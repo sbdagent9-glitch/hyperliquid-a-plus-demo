@@ -1,0 +1,7 @@
+[build]
+  publish = "public"
+  command = "echo build"
+  functions = "netlify/functions"
+
+[site]
+  name = "hyperliquid-a-plus-demo"
