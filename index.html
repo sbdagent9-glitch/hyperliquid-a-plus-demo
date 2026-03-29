@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hyperliquid A+ Entry Points</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,system-ui,sans-serif;background:#0a0e1a;color:#e0e6f0;min-height:100vh}
+.header{background:linear-gradient(135deg,#0d1528,#162040);padding:20px 24px;border-bottom:1px solid #1e2a45}
+.header h1{font-size:22px;color:#fff}
+.header .sub{font-size:12px;color:#6b7a99;margin-top:4px}
+.status{display:inline-block;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600;margin-left:12px}
+.status.live{background:#0f3d2e;color:#34d399}
+.status.loading{background:#3d2e0f;color:#fbbf24}
+.wrap{max-width:960px;margin:0 auto;padding:20px}
+.grid{display:grid;grid-template-columns:1fr;gap:12px}
+@media(min-width:600px){.grid{grid-template-columns:repeat(2,1fr)}}
+.card{background:#111827;border:1px solid #1e2a45;border-radius:10px;padding:16px;transition:border-color .2s}
+.card:hover{border-color:#3b82f6}
+.card .top{display:flex;justify-content:space-between;align-items:center}
+.asset{font-size:16px;font-weight:700;color:#fff}
+.tf{font-size:11px;color:#6b7a99;background:#1a2340;padding:2px 8px;border-radius:4px}
+.price-row{margin-top:10px;display:flex;align-items:baseline;gap:8px}
+.price{font-size:28px;font-weight:700;color:#60a5fa}
+.funding{font-size:11px;color:#9ca3af}
+.metrics{margin-top:12px;display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.metric{text-align:center}
+.metric .label{font-size:10px;color:#6b7a99;text-transform:uppercase}
+.metric .val{font-size:14px;font-weight:600;color:#d1d5db;margin-top:2px}
+.score-bar{margin-top:12px;background:#1a2340;border-radius:6px;height:8px;overflow:hidden}
+.score-fill{height:100%;border-radius:6px;transition:width .5s}
+.score-label{margin-top:4px;font-size:11px;color:#9ca3af;display:flex;justify-content:space-between}
+.reasons{margin-top:8px;font-size:12px;color:#9ca3af;line-height:1.5}
+.grade{font-size:14px;font-weight:800;padding:2px 8px;border-radius:4px}
+.grade.aplus{background:#064e3b;color:#34d399}
+.grade.a{background:#1e3a5f;color:#60a5fa}
+.grade.b{background:#3d2e0f;color:#fbbf24}
+.grade.c{background:#3b1111;color:#f87171}
+.footer{text-align:center;padding:20px;font-size:11px;color:#4b5563}
+#error{display:none;background:#3b1111;color:#f87171;padding:12px;border-radius:8px;margin-bottom:16px;font-size:13px}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Hyperliquid A+ Entry Points <span class="status loading" id="statusBadge">Loading...</span></h1>
+  <div class="sub">BTC · ETH · HYPE · SOL perpetuals — 1h / 4h / 1D — Live from Hyperliquid API</div>
+</div>
+<div class="wrap">
+  <div id="error"></div>
+  <div class="grid" id="signals"></div>
+</div>
+<div class="footer">Auto-refreshes every 60s · Data: Hyperliquid REST API · <span id="lastUpdate"></span></div>
+
+<script>
+const HL_API = 'https://api.hyperliquid.xyz/info';
+const ASSETS = ['BTC','ETH','HYPE','SOL'];
+const TFS = ['1h','4h','1d'];
+const TF_MS = {'1h':3600000,'4h':14400000,'1d':86400000};
+
+function calcRSI(closes, period=14){
+  if(closes.length<period+1) return null;
+  let g=0,l=0;
+  for(let i=1;i<=period;i++){const d=closes[i]-closes[i-1];if(d>0)g+=d;else l-=d;}
+  let ag=g/period,al=l/period;
+  for(let i=period+1;i<closes.length;i++){const d=closes[i]-closes[i-1];ag=(ag*(period-1)+(d>0?d:0))/period;al=(al*(period-1)+(d<0?-d:0))/period;}
+  if(al===0)return 100;
+  return 100-(100/(1+ag/al));
+}
+
+function volSpike(vols,lb=20){
+  if(vols.length<lb)return{spike:false,ratio:1};
+  const r=vols.slice(-lb,-1),avg=r.reduce((a,b)=>a+b,0)/r.length,cur=vols[vols.length-1];
+  return{spike:cur>avg*1.5,ratio:avg>0?cur/avg:1};
+}
+
+function trend(closes){
+  if(closes.length<20)return'neutral';
+  const s10=closes.slice(-10).reduce((a,b)=>a+b,0)/10,s20=closes.slice(-20).reduce((a,b)=>a+b,0)/20;
+  if(s10>s20*1.005)return'bullish';if(s10<s20*0.995)return'bearish';return'neutral';
+}
+
+function score(rsi,srsi,vr,tr){
+  let s=50;
+  if(rsi!==null){if(rsi<30)s+=20;else if(rsi<40)s+=10;else if(rsi>70)s-=10;else if(rsi>80)s-=20;}
+  if(srsi!==null){if(srsi<20)s+=15;else if(srsi<30)s+=8;else if(srsi>80)s-=8;}
+  if(vr>2)s+=15;else if(vr>1.5)s+=8;
+  if(tr==='bullish')s+=10;if(tr==='bearish')s-=5;
+  return Math.max(0,Math.min(100,s));
+}
+
+async function hlPost(body){
+  const r=await fetch(HL_API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  return r.json();
+}
+
+function gradeColor(g){
+  if(g==='A+')return'aplus';if(g==='A')return'a';if(g.startsWith('B'))return'b';return'c';
+}
+
+function scoreFillColor(s){
+  if(s>=80)return'#34d399';if(s>=70)return'#60a5fa';if(s>=60)return'#fbbf24';return'#f87171';
+}
+
+function fmt(n){
+  if(n===null||n===undefined)return'—';
+  if(n>=1000)return n.toLocaleString('en-US',{maximumFractionDigits:2});
+  if(n>=1)return n.toFixed(2);
+  return n.toFixed(4);
+}
+
+function fmtVol(n){
+  if(!n)return'—';
+  n=parseFloat(n);
+  if(n>=1e9)return(n/1e9).toFixed(1)+'B';
+  if(n>=1e6)return(n/1e6).toFixed(1)+'M';
+  if(n>=1e3)return(n/1e3).toFixed(1)+'K';
+  return n.toFixed(0);
+}
+
+async function loadSignals(){
+  const badge=document.getElementById('statusBadge');
+  const errEl=document.getElementById('error');
+  errEl.style.display='none';
+  badge.textContent='Loading...';badge.className='status loading';
+
+  try{
+    const meta=await hlPost({type:'metaAndAssetCtxs'});
+    const universe=meta[0]?.universe||[];
+    const ctxs=meta[1]||[];
+    const idxMap={};
+    universe.forEach((u,i)=>{if(ASSETS.includes(u.name))idxMap[u.name]=i;});
+
+    const now=Date.now();
+    const signals=[];
+
+    for(const asset of ASSETS){
+      const ui=idxMap[asset];
+      if(ui===undefined)continue;
+      const ctx=ctxs[ui]||{};
+      const uMeta=universe[ui];
+
+      for(const tf of TFS){
+        let candles;
+        try{
+          candles=await hlPost({type:'candleSnapshot',req:{coin:asset,interval:tf,startTime:now-(50*TF_MS[tf]),endTime:now}});
+        }catch(e){continue;}
+        if(!candles||!Array.isArray(candles)||candles.length<15)continue;
+
+        const closes=candles.map(c=>parseFloat(c.c));
+        const vols=candles.map(c=>parseFloat(c.v));
+        const rsi=calcRSI(closes);
+        const rsiArr=[];
+        for(let i=14;i<=closes.length;i++)rsiArr.push(calcRSI(closes.slice(0,i)));
+        const srsi=rsiArr.length>=14?calcRSI(rsiArr):null;
+        const vs=volSpike(vols);
+        const tr=trend(closes);
+        const sc=score(rsi,srsi,vs.ratio,tr);
+        const grade=sc>=80?'A+':sc>=70?'A':sc>=60?'B+':sc>=50?'B':'C';
+
+        const reasons=[];
+        if(rsi!==null&&rsi<35)reasons.push('RSI oversold ('+rsi.toFixed(1)+')');
+        if(rsi!==null&&rsi>65)reasons.push('RSI overbought ('+rsi.toFixed(1)+')');
+        if(srsi!==null&&srsi<25)reasons.push('StochRSI oversold');
+        if(vs.spike)reasons.push('Vol spike ('+vs.ratio.toFixed(1)+'x)');
+        if(tr!=='neutral')reasons.push('Trend: '+tr);
+
+        signals.push({asset,tf,entry:closes[closes.length-1],markPx:parseFloat(ctx.markPx),
+          rsi,srsi,volRatio:vs.ratio,trend:tr,score:sc,grade,reasons:reasons.length?reasons:['No strong signal'],
+          maxLev:uMeta.maxLeverage,funding:ctx.funding,oi:ctx.openInterest,dayVol:ctx.dayNtlVlm});
+      }
+    }
+
+    signals.sort((a,b)=>b.score-a.score);
+    render(signals);
+    badge.textContent='Live';badge.className='status live';
+    document.getElementById('lastUpdate').textContent='Updated: '+new Date().toLocaleTimeString();
+  }catch(e){
+    errEl.textContent='Error loading data: '+e.message;errEl.style.display='block';
+    badge.textContent='Error';badge.className='status loading';
+  }
+}
+
+function render(signals){
+  const root=document.getElementById('signals');
+  root.innerHTML='';
+  if(!signals.length){root.innerHTML='<div style="color:#9ca3af;padding:20px">No signals found. Data may be loading.</div>';return;}
+
+  signals.forEach(s=>{
+    const card=document.createElement('div');card.className='card';
+    card.innerHTML=`
+      <div class="top">
+        <span class="asset">${s.asset}-PERP</span>
+        <span class="tf">${s.tf.toUpperCase()}</span>
+      </div>
+      <div class="price-row">
+        <span class="price">$${fmt(s.entry)}</span>
+        <span class="funding">Funding: ${s.funding?parseFloat(s.funding).toFixed(6):'—'}</span>
+      </div>
+      <div class="metrics">
+        <div class="metric"><div class="label">RSI</div><div class="val">${s.rsi?s.rsi.toFixed(1):'—'}</div></div>
+        <div class="metric"><div class="label">Vol Ratio</div><div class="val">${s.volRatio.toFixed(1)}x</div></div>
+        <div class="metric"><div class="label">Max Lev</div><div class="val">${s.maxLev}x</div></div>
+      </div>
+      <div class="score-bar"><div class="score-fill" style="width:${s.score}%;background:${scoreFillColor(s.score)}"></div></div>
+      <div class="score-label">
+        <span>Score: ${s.score}/100</span>
+        <span class="grade ${gradeColor(s.grade)}">${s.grade}</span>
+      </div>
+      <div class="reasons">${s.reasons.join(' · ')}</div>
+    `;
+    root.appendChild(card);
+  });
+}
+
+loadSignals();
+setInterval(loadSignals,60000);
+</script>
+</body>
+</html>
