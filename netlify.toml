@@ -10,3 +10,8 @@
  from = "/" 
  to = "https://hyperliquid-a-plus-demo-20260329.netlify.app/" 
  status = 301
+
+[[redirects]]
+ from = "/" 
+ to = "https://hyperliquid-a-plus-demo-20260329.netlify.app/" 
+ status = 301
